@@ -2116,12 +2116,12 @@ idle_run_queue (gpointer user_data)
 
 	session = g_weak_ref_get (wref);
 	if (!session)
-		return FALSE;
+		return G_SOURCE_REMOVE;
 
 	remove_idle_run_queue_data (session, queue_data);
 	async_run_queue (session);
 	g_object_unref (session);
-	return FALSE;
+	return G_SOURCE_REMOVE;
 }
 
 static void
