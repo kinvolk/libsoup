@@ -141,6 +141,9 @@ typedef struct {
 	char **http_aliases, **https_aliases;
 
 	GHashTable *request_types;
+
+	GMutex queue_data_lock;
+	GHashTable *queue_data;
 } SoupSessionPrivate;
 
 #define SOUP_IS_PLAIN_SESSION(o) (G_TYPE_FROM_INSTANCE (o) == SOUP_TYPE_SESSION)
@@ -260,6 +263,9 @@ soup_session_init (SoupSession *session)
 	soup_session_add_feature_by_type (session, SOUP_TYPE_REQUEST_HTTP);
 	soup_session_add_feature_by_type (session, SOUP_TYPE_REQUEST_FILE);
 	soup_session_add_feature_by_type (session, SOUP_TYPE_REQUEST_DATA);
+
+	g_mutex_init (&priv->queue_data_lock);
+	priv->queue_data = g_hash_table_new (NULL, NULL);
 }
 
 static GObject *
@@ -351,6 +357,9 @@ soup_session_finalize (GObject *object)
 	g_hash_table_destroy (priv->request_types);
 
 	g_clear_pointer (&priv->socket_props, soup_socket_properties_unref);
+
+	g_mutex_clear (&priv->queue_data_lock);
+	g_hash_table_destroy (priv->queue_data);
 
 	G_OBJECT_CLASS (soup_session_parent_class)->finalize (object);
 }
@@ -2060,7 +2069,6 @@ async_run_queue (SoupSession *session)
 		    item->async_context != soup_session_get_async_context (session))
 			continue;
 
-		item->async_pending = FALSE;
 		soup_session_process_queue_item (session, item, &should_cleanup, TRUE);
 	}
 
@@ -2078,16 +2086,39 @@ async_run_queue (SoupSession *session)
 	g_object_unref (session);
 }
 
+typedef struct
+{
+	GWeakRef wref;
+	GMainContext *context;
+} IdleRunQueueData;
+
+static void
+remove_idle_run_queue_data (SoupSession *session,
+			    IdleRunQueueData *queue_data)
+{
+	SoupSessionPrivate *priv = soup_session_get_instance_private (session);
+	GMainContext *context = queue_data->context;
+	IdleRunQueueData *queue_data_for_context;
+
+	g_mutex_lock (&priv->queue_data_lock);
+	queue_data_for_context = g_hash_table_lookup (priv->queue_data, context);
+	if (queue_data_for_context == queue_data)
+		g_hash_table_remove (priv->queue_data, context);
+	g_mutex_unlock (&priv->queue_data_lock);
+}
+
 static gboolean
 idle_run_queue (gpointer user_data)
 {
-	GWeakRef *wref = user_data;
+	IdleRunQueueData *queue_data = user_data;
+	GWeakRef *wref = &queue_data->wref;
 	SoupSession *session;
 
 	session = g_weak_ref_get (wref);
 	if (!session)
 		return FALSE;
 
+	remove_idle_run_queue_data (session, queue_data);
 	async_run_queue (session);
 	g_object_unref (session);
 	return FALSE;
@@ -2096,10 +2127,16 @@ idle_run_queue (gpointer user_data)
 static void
 idle_run_queue_dnotify (gpointer user_data)
 {
-	GWeakRef *wref = user_data;
+	IdleRunQueueData *queue_data = user_data;
+	GWeakRef *wref = &queue_data->wref;
+	SoupSession *session = g_weak_ref_get (wref);
 
+	if (session) {
+		remove_idle_run_queue_data (session, queue_data);
+		g_object_unref (session);
+	}
 	g_weak_ref_clear (wref);
-	g_slice_free (GWeakRef, wref);
+	g_slice_free (IdleRunQueueData, queue_data);
 }
 
 /**
@@ -2288,6 +2325,35 @@ soup_session_pause_message (SoupSession *session,
 }
 
 static void
+schedule_idle_source_for_async_items_context (SoupSession *session,
+					      SoupMessageQueueItem *item) {
+	SoupSessionPrivate *priv = soup_session_get_instance_private (session);
+	GMainContext *context = item->async_context ? item->async_context : g_main_context_default ();
+	GSource *source;
+	IdleRunQueueData *queue_data;
+
+	g_mutex_lock (&priv->queue_data_lock);
+	if (g_hash_table_contains (priv->queue_data, context)) {
+		g_mutex_unlock (&priv->queue_data_lock);
+		return;
+	}
+
+	queue_data = g_slice_new (IdleRunQueueData);
+	g_weak_ref_init (&queue_data->wref, session);
+	queue_data->context = context;
+
+	source = g_idle_source_new ();
+	g_source_set_priority (source, G_PRIORITY_DEFAULT);
+	g_source_set_callback (source, idle_run_queue, queue_data, idle_run_queue_dnotify);
+
+	g_hash_table_insert (priv->queue_data, context, queue_data);
+	g_mutex_unlock (&priv->queue_data_lock);
+
+	g_source_attach (source, context);
+	g_source_unref (source);
+}
+
+static void
 soup_session_real_kick_queue (SoupSession *session)
 {
 	SoupSessionPrivate *priv = soup_session_get_instance_private (session);
@@ -2306,17 +2372,9 @@ soup_session_real_kick_queue (SoupSession *session)
 			GMainContext *context = item->async_context ? item->async_context : g_main_context_default ();
 
 			if (!g_hash_table_contains (async_pending, context)) {
-				if (!item->async_pending) {
-					GWeakRef *wref = g_slice_new (GWeakRef);
-					GSource *source;
-
-					g_weak_ref_init (wref, session);
-					source = soup_add_completion_reffed (context, idle_run_queue, wref, idle_run_queue_dnotify);
-					g_source_unref (source);
-				}
+				schedule_idle_source_for_async_items_context (session, item);
 				g_hash_table_add (async_pending, context);
 			}
-			item->async_pending = TRUE;
 		} else
 			have_sync_items = TRUE;
 	}
