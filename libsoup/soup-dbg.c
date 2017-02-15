@@ -1,0 +1,27 @@
+/* -*- Mode: C; tab-width: 8; indent-tabs-mode: t; c-basic-offset: 8 -*- */
+
+#include "soup-dbg.h"
+
+#define SOUP_STATE_STR(state) case state: return #state
+
+const gchar *
+soup_dbg_message_queue_item_state_to_string (SoupMessageQueueItemState state)
+{
+	switch (state) {
+	SOUP_STATE_STR (SOUP_MESSAGE_STARTING);
+	SOUP_STATE_STR (SOUP_MESSAGE_GOT_CONNECTION);
+	SOUP_STATE_STR (SOUP_MESSAGE_CONNECTING);
+	SOUP_STATE_STR (SOUP_MESSAGE_CONNECTED);
+	SOUP_STATE_STR (SOUP_MESSAGE_TUNNELING);
+	SOUP_STATE_STR (SOUP_MESSAGE_TUNNELED);
+	SOUP_STATE_STR (SOUP_MESSAGE_READY);
+	SOUP_STATE_STR (SOUP_MESSAGE_RUNNING);
+	SOUP_STATE_STR (SOUP_MESSAGE_CACHED);
+	SOUP_STATE_STR (SOUP_MESSAGE_RESTARTING);
+	SOUP_STATE_STR (SOUP_MESSAGE_FINISHING);
+	SOUP_STATE_STR (SOUP_MESSAGE_FINISHED);
+	}
+	return "UNKNOWN!";
+}
+
+#undef SOUP_STATE_STR

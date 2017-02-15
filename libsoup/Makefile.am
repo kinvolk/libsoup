@@ -150,6 +150,8 @@ libsoup_2_4_la_SOURCES =		\
 	soup-cookie-jar-db.c		\
 	soup-cookie-jar-text.c		\
 	soup-date.c			\
+	soup-dbg.h			\
+	soup-dbg.c			\
 	soup-directory-input-stream.h	\
 	soup-directory-input-stream.c	\
 	soup-enum-types.h		\

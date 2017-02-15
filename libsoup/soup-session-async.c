@@ -16,6 +16,8 @@
 #include "soup-message-queue.h"
 #include "soup-misc-private.h"
 
+#include "soup-dbg.h"
+
 /**
  * SECTION:soup-session-async
  * @short_description: (Deprecated) SoupSession for asynchronous
@@ -125,8 +127,10 @@ soup_session_async_cancel_message (SoupSession *session, SoupMessage *msg,
 	 */
 	if (soup_message_io_in_progress (msg))
 		soup_message_io_finished (msg);
-	else if (item->state != SOUP_MESSAGE_FINISHED)
+	else if (item->state != SOUP_MESSAGE_FINISHED) {
+		SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_FINISHING);
 		item->state = SOUP_MESSAGE_FINISHING;
+	}
 
 	if (item->state != SOUP_MESSAGE_FINISHED)
 		soup_session_process_queue_item (session, item, NULL, FALSE);

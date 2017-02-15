@@ -25,6 +25,8 @@
 #include "soup-websocket.h"
 #include "soup-websocket-connection.h"
 
+#include "soup-dbg.h"
+
 #define HOST_KEEP_ALIVE 5 * 60 * 1000 /* 5 min in msecs */
 
 /**
@@ -1567,12 +1569,14 @@ message_completed (SoupMessage *msg, SoupMessageIOCompletion completion, gpointe
 		soup_session_kick_queue (item->session);
 
 	if (completion == SOUP_MESSAGE_IO_STOLEN) {
+		SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_FINISHED);
 		item->state = SOUP_MESSAGE_FINISHED;
 		soup_session_unqueue_item (item->session, item);
 		return;
 	}
 
 	if (item->state != SOUP_MESSAGE_RESTARTING) {
+		SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_FINISHING);
 		item->state = SOUP_MESSAGE_FINISHING;
 
 		if (item->new_api && !item->async)
@@ -1625,8 +1629,10 @@ tunnel_complete (SoupMessageQueueItem *tunnel_item,
 	soup_message_finished (tunnel_item->msg);
 	soup_message_queue_item_unref (tunnel_item);
 
-	if (item->msg->status_code)
+	if (item->msg->status_code) {
+		SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_FINISHING);
 		item->state = SOUP_MESSAGE_FINISHING;
+	}
 	soup_message_set_https_status (item->msg, item->conn);
 
 	item->error = error;
@@ -1639,6 +1645,7 @@ tunnel_complete (SoupMessageQueueItem *tunnel_item,
 			soup_session_set_item_status (session, item, status, error);
 	}
 
+	SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_READY);
 	item->state = SOUP_MESSAGE_READY;
 	if (item->async)
 		soup_session_kick_queue (session);
@@ -1670,6 +1677,7 @@ tunnel_message_completed (SoupMessage *msg, SoupMessageIOCompletion completion,
 	if (tunnel_item->state == SOUP_MESSAGE_RESTARTING) {
 		soup_message_restarted (msg);
 		if (tunnel_item->conn) {
+			SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_RUNNING);
 			tunnel_item->state = SOUP_MESSAGE_RUNNING;
 			soup_session_send_queue_item (session, tunnel_item,
 						      tunnel_message_completed);
@@ -1679,6 +1687,7 @@ tunnel_message_completed (SoupMessage *msg, SoupMessageIOCompletion completion,
 		soup_message_set_status (msg, SOUP_STATUS_TRY_AGAIN);
 	}
 
+	SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_FINISHED);
 	tunnel_item->state = SOUP_MESSAGE_FINISHED;
 	soup_session_unqueue_item (session, tunnel_item);
 
@@ -1708,6 +1717,7 @@ tunnel_connect (SoupMessageQueueItem *item)
 	SoupURI *uri;
 	SoupMessage *msg;
 
+	SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_TUNNELING);
 	item->state = SOUP_MESSAGE_TUNNELING;
 
 	uri = soup_connection_get_remote_uri (item->conn);
@@ -1721,6 +1731,7 @@ tunnel_connect (SoupMessageQueueItem *item)
 	tunnel_item->related = item;
 	soup_message_queue_item_ref (item);
 	soup_session_set_item_connection (session, tunnel_item, item->conn);
+	SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_RUNNING);
 	tunnel_item->state = SOUP_MESSAGE_RUNNING;
 
 	g_signal_emit (session, signals[TUNNELING], 0, tunnel_item->conn);
@@ -1738,6 +1749,7 @@ connect_complete (SoupMessageQueueItem *item, SoupConnection *conn, GError *erro
 	soup_message_set_https_status (item->msg, item->conn);
 
 	if (!error) {
+		SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_CONNECTED);
 		item->state = SOUP_MESSAGE_CONNECTED;
 		return;
 	}
@@ -1749,6 +1761,7 @@ connect_complete (SoupMessageQueueItem *item, SoupConnection *conn, GError *erro
 		if (!item->new_api || item->msg->status_code == 0)
 			soup_session_set_item_status (session, item, status, error);
 		soup_session_set_item_connection (session, item, NULL);
+		SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_READY);
 		item->state = SOUP_MESSAGE_READY;
 	}
 }
@@ -1925,11 +1938,13 @@ get_connection (SoupMessageQueueItem *item, gboolean *should_cleanup)
 	item->conn_is_dedicated = is_dedicated_connection;
 
 	if (soup_connection_get_state (item->conn) != SOUP_CONNECTION_NEW) {
+		SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_READY);
 		item->state = SOUP_MESSAGE_READY;
 		soup_message_set_https_status (item->msg, item->conn);
 		return TRUE;
 	}
 
+	SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_CONNECTING);
 	item->state = SOUP_MESSAGE_CONNECTING;
 
 	if (item->async) {
@@ -1968,20 +1983,26 @@ soup_session_process_queue_item (SoupSession          *session,
 		case SOUP_MESSAGE_CONNECTED:
 			if (soup_connection_is_tunnelled (item->conn))
 				tunnel_connect (item);
-			else
+			else {
+				SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_READY);
 				item->state = SOUP_MESSAGE_READY;
+			}
 			break;
 
 		case SOUP_MESSAGE_READY:
 			if (item->msg->status_code) {
 				if (item->msg->status_code == SOUP_STATUS_TRY_AGAIN) {
 					soup_message_cleanup_response (item->msg);
+					SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_STARTING);
 					item->state = SOUP_MESSAGE_STARTING;
-				} else
+				} else {
+					SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_FINISHING);
 					item->state = SOUP_MESSAGE_FINISHING;
+				}
 				break;
 			}
 
+			SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_RUNNING);
 			item->state = SOUP_MESSAGE_RUNNING;
 
 			soup_session_send_queue_item (session, item, message_completed);
@@ -1998,6 +2019,7 @@ soup_session_process_queue_item (SoupSession          *session,
 				return;
 
 			g_warn_if_fail (item->new_api);
+			SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_FINISHING);
 			item->state = SOUP_MESSAGE_FINISHING;
 			break;
 
@@ -2006,11 +2028,13 @@ soup_session_process_queue_item (SoupSession          *session,
 			return;
 
 		case SOUP_MESSAGE_RESTARTING:
+			SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_STARTING);
 			item->state = SOUP_MESSAGE_STARTING;
 			soup_message_restarted (item->msg);
 			break;
 
 		case SOUP_MESSAGE_FINISHING:
+			SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_FINISHED);
 			item->state = SOUP_MESSAGE_FINISHED;
 			soup_message_finished (item->msg);
 			if (item->state != SOUP_MESSAGE_FINISHED) {
@@ -2029,6 +2053,8 @@ soup_session_process_queue_item (SoupSession          *session,
 			/* Nothing to do with this message in any
 			 * other state.
 			 */
+			SOUP_DBG_MSG_PRINTF(item->msg, "default case\nstate: %s\n",
+					    soup_dbg_message_queue_item_state_to_string(item->state));
 			g_warn_if_fail (item->async);
 			return;
 		}
@@ -2052,6 +2078,13 @@ async_run_queue (SoupSession *session)
 	     item = soup_message_queue_next (priv->queue, item)) {
 		msg = item->msg;
 
+		SOUP_DBG_MSG_PRINTF(msg, "method is connect: %s\nitem async: %s\nsame context: %s\nitem context:    %p\nsession context: %p\n",
+				    ((msg->method == SOUP_METHOD_CONNECT) ? "true" : "false"),
+				    (item->async ? "true" : "false"),
+				    ((item->async_context == soup_session_get_async_context (session)) ? "true" : "false"),
+				    item->async_context,
+				    soup_session_get_async_context (session));
+
 		/* CONNECT messages are handled specially */
 		if (msg->method == SOUP_METHOD_CONNECT)
 			continue;
@@ -2060,8 +2093,13 @@ async_run_queue (SoupSession *session)
 		    item->async_context != soup_session_get_async_context (session))
 			continue;
 
+		SOUP_DBG_MSG_PRINTF(item->msg, "setting async pending to FALSE\n");
 		item->async_pending = FALSE;
+		SOUP_DBG_MSG_PRINTF(item->msg, "state before processing: %s\n",
+				    soup_dbg_message_queue_item_state_to_string(item->state));
 		soup_session_process_queue_item (session, item, &should_cleanup, TRUE);
+		SOUP_DBG_MSG_PRINTF(item->msg, "state after processing: %s\n",
+				    soup_dbg_message_queue_item_state_to_string(item->state));
 	}
 
 	if (try_cleanup && should_cleanup) {
@@ -2184,6 +2222,7 @@ soup_session_real_requeue_message (SoupSession *session, SoupMessage *msg)
 			g_warning ("SoupMessage %p stuck in infinite loop?", msg);
 	} else {
 		item->resend_count++;
+		SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_RESTARTING);
 		item->state = SOUP_MESSAGE_RESTARTING;
 	}
 
@@ -2310,12 +2349,17 @@ soup_session_real_kick_queue (SoupSession *session)
 					GWeakRef *wref = g_slice_new (GWeakRef);
 					GSource *source;
 
+					SOUP_DBG_MSG_PRINTF(item->msg, "scheduled the gsource\n");
 					g_weak_ref_init (wref, session);
 					source = soup_add_completion_reffed (context, idle_run_queue, wref, idle_run_queue_dnotify);
 					g_source_unref (source);
-				}
+				} else
+					SOUP_DBG_MSG_PRINTF(item->msg, "already pending\n");
+
 				g_hash_table_add (async_pending, context);
-			}
+			} else
+				SOUP_DBG_MSG_PRINTF(item->msg, "context already has the source scheduled\n");
+			SOUP_DBG_MSG_PRINTF(item->msg, "setting async pending to TRUE\n");
 			item->async_pending = TRUE;
 		} else
 			have_sync_items = TRUE;
@@ -3860,6 +3904,12 @@ async_send_request_return_result (SoupMessageQueueItem *item,
 		g_clear_pointer (&item->io_source, g_source_unref);
 	}
 
+	SOUP_DBG_MSG_PRINTF(item->msg, "error: %s\nitem error: %s\nhas stream: %s\ntransport error: %s\nstatus code: %u\n",
+			    (error ? "true" : "false"),
+			    (item->error ? "true" : "false"),
+			    (stream ? "true" : "false"),
+			    (SOUP_STATUS_IS_TRANSPORT_ERROR (item->msg->status_code) ? "true" : "false"),
+			    item->msg->status_code);
 	if (error)
 		g_task_return_error (task, error);
 	else if (item->error) {
@@ -4017,6 +4067,7 @@ try_run_until_read (SoupMessageQueueItem *item)
 	}
 
 	if (g_error_matches (error, SOUP_HTTP_ERROR, SOUP_STATUS_TRY_AGAIN)) {
+		SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_RESTARTING);
 		item->state = SOUP_MESSAGE_RESTARTING;
 		soup_message_io_finished (item->msg);
 		g_error_free (error);
@@ -4027,6 +4078,7 @@ try_run_until_read (SoupMessageQueueItem *item)
 		if (item->state != SOUP_MESSAGE_FINISHED) {
 			if (soup_message_io_in_progress (item->msg))
 				soup_message_io_finished (item->msg);
+			SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_FINISHING);
 			item->state = SOUP_MESSAGE_FINISHING;
 			soup_session_process_queue_item (item->session, item, NULL, FALSE);
 		}
@@ -4053,6 +4105,7 @@ cache_stream_finished (GInputStream         *stream,
 {
 	g_signal_handlers_disconnect_matched (stream, G_SIGNAL_MATCH_DATA,
 					      0, 0, NULL, NULL, item);
+	SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_FINISHING);
 	item->state = SOUP_MESSAGE_FINISHING;
 	soup_session_kick_queue (item->session);
 	soup_message_queue_item_unref (item);
@@ -4098,6 +4151,7 @@ static void
 cancel_cache_response (SoupMessageQueueItem *item)
 {
 	item->paused = FALSE;
+	SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_FINISHING);
 	item->state = SOUP_MESSAGE_FINISHING;
 	soup_message_set_status (item->msg, SOUP_STATUS_CANCELLED);
 	soup_session_kick_queue (item->session);
@@ -4139,6 +4193,7 @@ conditional_get_ready_cb (SoupSession *session, SoupMessage *msg, gpointer user_
 	/* The resource was modified or the server returned a 200
 	 * OK. Either way we reload it. FIXME.
 	 */
+	SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_STARTING);
 	item->state = SOUP_MESSAGE_STARTING;
 	soup_session_kick_queue (session);
 }
@@ -4295,8 +4350,10 @@ soup_session_send_async (SoupSession         *session,
 	 */
 	g_task_set_check_cancellable (item->task, FALSE);
 
-	if (async_respond_from_cache (session, item))
+	if (async_respond_from_cache (session, item)) {
+		SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_CACHED);
 		item->state = SOUP_MESSAGE_CACHED;
+	}
 	else
 		soup_session_kick_queue (session);
 }
@@ -4333,8 +4390,10 @@ soup_session_send_finish (SoupSession   *session,
 
 		if (soup_message_io_in_progress (item->msg))
 			soup_message_io_finished (item->msg);
-		else if (item->state != SOUP_MESSAGE_FINISHED)
+		else if (item->state != SOUP_MESSAGE_FINISHED) {
+			SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_FINISHING);
 			item->state = SOUP_MESSAGE_FINISHING;
+		}
 
 		if (item->state != SOUP_MESSAGE_FINISHED)
 			soup_session_process_queue_item (session, item, NULL, FALSE);
@@ -4415,6 +4474,7 @@ soup_session_send (SoupSession   *session,
 		/* Send request, read headers */
 		if (!soup_message_io_run_until_read (msg, TRUE, item->cancellable, &my_error)) {
 			if (g_error_matches (my_error, SOUP_HTTP_ERROR, SOUP_STATUS_TRY_AGAIN)) {
+				SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_RESTARTING);
 				item->state = SOUP_MESSAGE_RESTARTING;
 				soup_message_io_finished (item->msg);
 				g_clear_error (&my_error);
@@ -4478,8 +4538,10 @@ soup_session_send (SoupSession   *session,
 	if (!stream) {
 		if (soup_message_io_in_progress (msg))
 			soup_message_io_finished (msg);
-		else if (item->state != SOUP_MESSAGE_FINISHED)
+		else if (item->state != SOUP_MESSAGE_FINISHED) {
+			SOUP_DBG_ITEM_DUMP(item, SOUP_MESSAGE_FINISHING);
 			item->state = SOUP_MESSAGE_FINISHING;
+		}
 
 		if (item->state != SOUP_MESSAGE_FINISHED)
 			soup_session_process_queue_item (session, item, NULL, TRUE);

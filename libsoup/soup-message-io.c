@@ -23,6 +23,8 @@
 #include "soup-message-queue.h"
 #include "soup-misc-private.h"
 
+#include "soup-dbg.h"
+
 typedef enum {
 	SOUP_MESSAGE_IO_CLIENT,
 	SOUP_MESSAGE_IO_SERVER
@@ -177,10 +179,13 @@ soup_message_io_finished (SoupMessage *msg)
 	else
 		completion = SOUP_MESSAGE_IO_INTERRUPTED;
 
+	SOUP_DBG_MSG_PRINTF (msg, "completion: %s\n",
+			     ((completion == SOUP_MESSAGE_IO_COMPLETE) ? "complete" : "interrupted"));
 	g_object_ref (msg);
 	soup_message_io_cleanup (msg);
 	if (completion_cb)
 		completion_cb (msg, completion, completion_data);
+	SOUP_DBG_MSG_PRINTF (msg, "completion done\n");
 	g_object_unref (msg);
 }
 
@@ -1060,8 +1065,10 @@ io_run (SoupMessage *msg, gboolean blocking)
 		io->io_source = soup_message_io_get_source (msg, NULL, io_run_ready, msg);
 		g_source_attach (io->io_source, io->async_context);
 	} else if (error && priv->io_data == io) {
-		if (g_error_matches (error, SOUP_HTTP_ERROR, SOUP_STATUS_TRY_AGAIN))
+		if (g_error_matches (error, SOUP_HTTP_ERROR, SOUP_STATUS_TRY_AGAIN)) {
+			SOUP_DBG_ITEM_DUMP(io->item, SOUP_MESSAGE_RESTARTING);
 			io->item->state = SOUP_MESSAGE_RESTARTING;
+		}
 		else if (error->domain == G_TLS_ERROR) {
 			soup_message_set_status_full (msg,
 						      SOUP_STATUS_SSL_FAILED,
