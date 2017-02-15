@@ -1559,12 +1559,10 @@ soup_session_set_item_status (SoupSession          *session,
 		soup_message_set_status (item->msg, status_code);
 }
 
-
 static void
-message_completed (SoupMessage *msg, SoupMessageIOCompletion completion, gpointer user_data)
+real_message_completed (SoupMessageIOCompletion  completion,
+			SoupMessageQueueItem    *item)
 {
-	SoupMessageQueueItem *item = user_data;
-
 	if (item->async)
 		soup_session_kick_queue (item->session);
 
@@ -1582,6 +1580,55 @@ message_completed (SoupMessage *msg, SoupMessageIOCompletion completion, gpointe
 		if (item->new_api && !item->async)
 			soup_session_process_queue_item (item->session, item, NULL, TRUE);
 	}
+}
+
+typedef struct {
+	SoupMessageIOCompletion completion;
+	SoupMessageQueueItem *item;
+} MessageCompletedData;
+
+static void
+message_completion_data_free (gpointer data) {
+	MessageCompletedData *mc_data = data;
+
+	if (!mc_data)
+		return;
+	if (mc_data->item)
+		soup_message_queue_item_unref (mc_data->item);
+	g_slice_free (MessageCompletedData, mc_data);
+}
+
+static gboolean
+message_completed_gsource_cb (gpointer user_data) {
+	MessageCompletedData *data = user_data;
+
+	real_message_completed (data->completion, data->item);
+	return G_SOURCE_REMOVE;
+}
+
+static void
+message_completed (SoupMessage             *msg,
+		   SoupMessageIOCompletion  completion,
+		   gpointer                 user_data)
+{
+	SoupMessageQueueItem *item = user_data;
+	GMainContext *session_context = soup_session_get_async_context (item->session);
+
+	if (item->async && !g_main_context_is_owner (session_context)) {
+		GSource *source;
+		MessageCompletedData *data;
+
+		soup_message_queue_item_ref (item);
+		data = g_slice_new (MessageCompletedData);
+		data->completion = completion;
+		data->item = item;
+		source = soup_add_completion_reffed (item->async_context, message_completed_gsource_cb, data, message_completion_data_free);
+		g_source_set_name (source, "Soup idle message completed runner");
+		g_source_unref (source);
+		return;
+	}
+
+	real_message_completed (completion, item);
 }
 
 static guint
