@@ -112,6 +112,7 @@ typedef struct {
 	SoupSocketProperties *socket_props;
 
 	SoupMessageQueue *queue;
+	GRWLock queue_lock;
 
 	char *user_agent;
 	char *accept_language;
@@ -218,6 +219,7 @@ soup_session_init (SoupSession *session)
 	SoupAuthManager *auth_manager;
 
 	priv->queue = soup_message_queue_new (session);
+	g_rw_lock_init (&priv->queue_lock);
 
 	g_mutex_init (&priv->conn_lock);
 	g_cond_init (&priv->conn_cond);
@@ -322,6 +324,7 @@ soup_session_finalize (GObject *object)
 	SoupSessionPrivate *priv = soup_session_get_instance_private (session);
 
 	soup_message_queue_destroy (priv->queue);
+	g_rw_lock_clear (&priv->queue_lock);
 
 	g_mutex_clear (&priv->conn_lock);
 	g_cond_clear (&priv->conn_cond);
@@ -2046,6 +2049,7 @@ async_run_queue (SoupSession *session)
 	g_object_ref (session);
 	soup_session_cleanup_connections (session, FALSE);
 
+	g_rw_lock_reader_lock (&priv->queue_lock);
  try_again:
 	for (item = soup_message_queue_first (priv->queue);
 	     item;
@@ -2075,6 +2079,7 @@ async_run_queue (SoupSession *session)
 		}
 	}
 
+	g_rw_lock_reader_unlock (&priv->queue_lock);
 	g_object_unref (session);
 }
 
@@ -2288,7 +2293,7 @@ soup_session_pause_message (SoupSession *session,
 }
 
 static void
-soup_session_real_kick_queue (SoupSession *session)
+kick_queue (SoupSession *session)
 {
 	SoupSessionPrivate *priv = soup_session_get_instance_private (session);
 	SoupMessageQueueItem *item;
@@ -2299,6 +2304,8 @@ soup_session_real_kick_queue (SoupSession *session)
 		return;
 
 	async_pending = g_hash_table_new (NULL, NULL);
+
+	g_rw_lock_writer_lock (&priv->queue_lock);
 	for (item = soup_message_queue_first (priv->queue);
 	     item;
 	     item = soup_message_queue_next (priv->queue, item)) {
@@ -2320,6 +2327,7 @@ soup_session_real_kick_queue (SoupSession *session)
 		} else
 			have_sync_items = TRUE;
 	}
+	g_rw_lock_writer_unlock (&priv->queue_lock);
 	g_hash_table_unref (async_pending);
 
 	if (have_sync_items) {
@@ -2327,6 +2335,27 @@ soup_session_real_kick_queue (SoupSession *session)
 		g_cond_broadcast (&priv->conn_cond);
 		g_mutex_unlock (&priv->conn_lock);
 	}
+}
+
+static gboolean
+kick_queue_gsource_cb (gpointer user_data)
+{
+	SoupSession *session = SOUP_SESSION (user_data);
+
+	kick_queue (session);
+	return G_SOURCE_REMOVE;
+}
+
+static void
+soup_session_real_kick_queue (SoupSession *session)
+{
+	SoupSessionPrivate *priv = soup_session_get_instance_private (session);
+	GSource *source = soup_add_completion_reffed (g_main_context_get_thread_default (),
+						      kick_queue_gsource_cb,
+						      g_object_ref (session),
+						      g_object_unref);
+	g_source_set_name (source, "soup kick queue source");
+	g_source_unref (source);
 }
 
 void
